@@ -7,8 +7,6 @@ import os
 import sys
 
 import hashlib
-import json
-import sqlite3
 
 from pathlib import Path
 
@@ -16,7 +14,6 @@ from logzero import logger
 from tqdm.auto import tqdm
 
 import sqlalchemy
-#from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import Column
 from sqlalchemy.types import Integer, String
@@ -29,12 +26,10 @@ Base = declarative_base()
 class File(Base):
     __tablename__ = 'files'
     id = Column(Integer, primary_key=True)
-    #path = Column(String, unique=True)
     absolute_path = Column(String)
     relative_path = Column(String)
     size = Column(Integer)
     hash = Column(String)
-    #tags = Column(String)
     updated_at = Column(DateTime)
     mime_type = Column(String)
 
@@ -52,19 +47,14 @@ class Directory(Base):
 def connect_sqlite(database):
     absolute_path = os.path.abspath(os.path.expanduser(database))
     logger.debug('absolute_path: %s', absolute_path)
-    #basedir = os.path.dirname(database)
     basedir = os.path.dirname(absolute_path)
     if not os.path.exists(basedir):
         logger.debug('Creating directory: %s', basedir)
         os.makedirs(basedir)
-    #path = 'sqlite:///' + database
-    #path = 'sqlite://' + absolute_path
     path = 'sqlite:///' + absolute_path
     logger.debug('path: %s', path)
-    #engine = sqlalchemy.create_engine(path, echo=True)
     engine = sqlalchemy.create_engine(path, echo=False)
     Base.metadata.create_all(bind=engine)
-    #return engine
     session = sqlalchemy.orm.sessionmaker(bind=engine)()
     return session
 
@@ -116,16 +106,8 @@ def update_file(
 ):
     size = os.path.getsize(absolute_path)
     mtime = os.path.getmtime(absolute_path)
-    #updated_at = sqlalchemy.sql.func.datetime(mtime, 'unixepoch')
-    #updated_at = DateTime(mtime)
-    #updated_at = datetime.datetime.fromtimestamp(mtime)
     updated_at = datetime.datetime.fromtimestamp(int(mtime))
-    #logger.debug('updated_at: %s', updated_at)
     # 重複チェック
-    #found = session.query(File).filter(
-    #    File.absolute_path == absolute_path,
-    #    File.relative_path == relative_path,
-    #).first()
     file = find_file(
         session=session,
         absolute_path=absolute_path,
@@ -133,23 +115,17 @@ def update_file(
         size=size,
         updated_at=updated_at,
     )
-    #logger.debug('file: %s', file)
     modified = False
     if not file:
         file = File()
         session.add(instance=file)
         modified = True
         logger.debug('new file: %s', file)
-    #logger.debug('file.size: %s', file.size)
-    #logger.debug('size: %s', size)
-    #logger.debug('file.updated_at: %s', file.updated_at)
-    #logger.debug('updated_at: %s', updated_at)
     if any([
         file.size != size,
         file.updated_at != updated_at,
     ]):
         modified = True
-    #logger.debug('modified: %s', modified)
     if not modified:
         if all([
             file.absolute_path == absolute_path,
@@ -164,59 +140,20 @@ def update_file(
     if modified:
         mime_type = 'application/octet-stream'
         hash = hashlib.sha256(open(absolute_path, 'rb').read()).hexdigest()
-        #logger.debug('hash: %s', hash)
         file.mime_type = mime_type
         file.hash = hash
-    #file = File(
-    #    absolute_path=absolute_path,
-    #    relative_path=relative_path,
-    #    size=size,
-    #    updated_at=updated_at,
-    #    mime_type=mime_type,
-    #    hash=hash,
-    #)
-    #session.add(instance=file)
     session.commit()
 
 def command_scan(args):
     logger.debug('Scanning files')
     logger.debug('args: %s', args)
-    #engine = sqlalchemy.create_engine('sqlite:///' + args.database)
-    #engine = connect_sqlite(args.database)
-    #logger.debug('engine: %s', engine)
-    #session = sqlalchemy.orm.sessionmaker(bind=engine)()
     session = connect_sqlite(args.database)
     for elem in os.listdir(args.path):
-        #logger.debug('elem: %s', elem)
         path = os.path.join(args.path, elem)
         if os.path.isfile(path):
             logger.debug('file: %s', path)
             absolute_path = os.path.abspath(path)
             relative_path = os.path.relpath(path, args.path)
-            #size = os.path.getsize(path)
-            #mtime = os.path.getmtime(path)
-            ##logger.debug('updated_at: %s', updated_at)
-            ##updated_at = sqlalchemy.sql.func.datetime(updated_at, 'unixepoch')
-            #updated_at = sqlalchemy.sql.func.datetime(mtime, 'unixepoch')
-            #logger.debug('updated_at: %s', updated_at)
-            ## 重複チェック
-            #found = session.query(File).filter(
-            #    File.absolute_path == absolute_path,
-            #    File.relative_path == relative_path,
-            #).first()
-            #mime_type = 'application/octet-stream'
-            #hash = hashlib.sha256(open(path, 'rb').read()).hexdigest()
-            #logger.debug('hash: %s', hash)
-            #file = File(
-            #    absolute_path=absolute_path,
-            #    relative_path=relative_path,
-            #    size=size,
-            #    updated_at=updated_at,
-            #    mime_type=mime_type,
-            #    hash=hash,
-            #)
-            #session.add(instance=file)
-            #session.commit()
             update_file(
                 session=session,
                 absolute_path=absolute_path,
@@ -229,15 +166,10 @@ def command_scan(args):
 
 def command_find(args):
     session = connect_sqlite(args.database)
-    #files = session.query(File).all()
-    #files = session.query(File).limit(10)
     files = session.query(File)
     logger.debug('files: %s', files)
     df = pd.read_sql(files.statement, files.session.bind)
-    #logger.debug('df: \n%s', df)
-    #j = df.to_json(orient='records')
     j = df.to_json(orient='records', indent=2)
-    #j = json.dumps(df.to_dict(orient='records'), indent=2)
     logger.debug('j: \n%s', j)
 
 def main():
@@ -267,7 +199,6 @@ def main():
     else:
         parser.print_help()
         sys.exit(1)
-    #logger.debug('args: %s', args)
 
 if __name__ == '__main__':
     main()
