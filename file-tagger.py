@@ -43,23 +43,15 @@ class File(Base):
     def __repr__(self):
         return f'File(id={self.id}, absolute_path={self.absolute_path}, updated_at={self.updated_at})'
 
-class Directory(Base):
-    __tablename__ = 'directories'
-    id = Column(Integer, primary_key=True)
-    #path = Column(String, unique=True)
-    absolute_path = Column(String)
-    relative_path = Column(String)
-    updated_at = Column(DateTime)
-
 def connect_sqlite(database):
     absolute_path = os.path.abspath(os.path.expanduser(database))
-    logger.debug('absolute_path: %s', absolute_path)
+    #logger.debug('absolute_path: %s', absolute_path)
     basedir = os.path.dirname(absolute_path)
     if not os.path.exists(basedir):
         logger.debug('Creating directory: %s', basedir)
         os.makedirs(basedir)
     path = 'sqlite:///' + absolute_path
-    logger.debug('path: %s', path)
+    #logger.debug('path: %s', path)
     engine = sqlalchemy.create_engine(path, echo=False)
     Base.metadata.create_all(bind=engine)
     session = sqlalchemy.orm.sessionmaker(bind=engine)()
@@ -88,17 +80,17 @@ def find_file(
     ).first()
     if found:
         return found
-    # 相対パス、ファイルサイズ、更新日時が一致するものは、移動したファイルとみなす
+    # 絶対パス、ファイルサイズ、更新日時が一致するものは、基準ディレクトリが変更された可能性あり
     found = session.query(File).filter(
-        File.relative_path == relative_path,
+        File.absolute_path == relative_path,
         File.size == size,
         File.updated_at == updated_at,
     ).first()
     if found:
         return found
-    # 絶対パス、ファイルサイズ、更新日時が一致するものは、基準ディレクトリが変更された可能性あり
+    # 相対パス、ファイルサイズ、更新日時が一致するものは、移動したファイルとみなす
     found = session.query(File).filter(
-        File.absolute_path == relative_path,
+        File.relative_path == relative_path,
         File.size == size,
         File.updated_at == updated_at,
     ).first()
@@ -117,8 +109,8 @@ def find_duplicate(
         File.size == file.size,
         File.mime_type == file.mime_type,
     ).first()
-    logger.debug('file.id: %s', file.id)
-    logger.debug('found: %s', found)
+    #logger.debug('file.id: %s', file.id)
+    #logger.debug('found: %s', found)
     if found:
         return found
     return None
@@ -184,34 +176,6 @@ def update_file(
         file.detected_as_duplicated = new_duplicated
         session.commit()
 
-def update_directory(
-    session: sqlalchemy.orm.Session,
-    absolute_path: str,
-    relative_path: str,
-):
-    found = session.query(Directory).filter(
-        Directory.absolute_path == absolute_path,
-        Directory.relative_path == relative_path,
-    ).first()
-    if found:
-        directory = found
-    else:
-        directory = Directory()
-        session.add(instance=directory)
-    mtime = os.path.getmtime(absolute_path)
-    updated_at = datetime.datetime.fromtimestamp(int(mtime))
-    if all([
-        directory.absolute_path == absolute_path,
-        directory.relative_path == relative_path,
-        directory.updated_at == updated_at,
-    ]):
-        logger.debug('no change: %s', directory)
-        return
-    directory.absolute_path = absolute_path
-    directory.relative_path = relative_path
-    directory.updated_at = datetime.datetime.now()
-    session.commit()
-
 def scan_directory(
     session: sqlalchemy.orm.Session,
     scan_path: str,
@@ -234,7 +198,7 @@ def scan_directory(
                 relative_path=relative_path,
             )
         elif os.path.isdir(found_path):
-            logger.debug('directory: %s', found_path)
+            #logger.debug('directory: %s', found_path)
             scan_directory(
                 session=session,
                 scan_path=scan_path,
@@ -257,12 +221,30 @@ def command_scan(args):
 
 def command_find(args):
     session = connect_sqlite(args.database)
-    files = session.query(File)
+    queries = []
+    if args.duplicated:
+        queries.append(File.detected_as_duplicated == True)
+    files = session.query(File).filter(
+        *queries,
+    )
     #logger.debug('files: %s', files)
     df = pd.read_sql(files.statement, files.session.bind)
-    j = df.to_json(orient='records', indent=2)
-    #logger.debug('j: \n%s', j)
-    logger.debug('files: \n%s', j)
+    #logger.debug('keys: %s', df.keys())
+    #logger.debug('files: \n%s', df)
+    df_selected = df[[
+        'id',
+        'absolute_path',
+        #'relative_path',
+        'size',
+        #'updated_at',
+        #'mime_type',
+        #'detected_as_duplicated',
+    ]]
+    #logger.debug('files: \n%s', df_selected)
+    #print(df_selected)
+    str_json = df.to_json(orient='records', indent=2)
+    #j = df_selected.to_json(orient='records', indent=2)
+    print(str_json)
 
 def main():
     parser = argparse.ArgumentParser(description='File Tag Manager')
@@ -283,6 +265,11 @@ def main():
     parser_scan.set_defaults(handler=command_scan)
 
     parser_find = subparsers.add_parser('find', help='Find files')
+    parser_find.add_argument(
+        '--duplicated', '-d',
+        action='store_true',
+        help='Find duplicated files'
+    )
     parser_find.set_defaults(handler=command_find)
 
     args = parser.parse_args()
