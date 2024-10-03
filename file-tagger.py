@@ -35,7 +35,7 @@ Base = declarative_base()
 class File(Base):
     __tablename__ = 'files'
     id = Column(Integer, primary_key=True)
-    absolute_path = Column(String)
+    absolute_path = Column(String, unique=True)
     relative_path = Column(String)
     size = Column(Integer)
     hash = Column(String)
@@ -47,13 +47,31 @@ class File(Base):
         return f'File(id={self.id}, absolute_path={self.absolute_path}, updated_at={self.updated_at})'
     
 class Rule(Base):
-    __tablename__ = 'ignore_rules'
+    __tablename__ = 'rules'
     id = Column(Integer, primary_key=True)
     type = Column(String)
     pattern = Column(String)
 
     def __repr__(self):
         return f'Rule(id={self.id}, type={self.type}, pattern={self.pattern})'
+
+class Tag(Base):
+    __tablename__ = 'tags'
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    num_files = Column(Integer, default=0)
+
+    def __repr__(self):
+        return f'Tag(id={self.id}, name={self.name})'
+
+class FileTagRelation(Base):
+    __tablename__ = 'file-tag-relations'
+    id = Column(Integer, primary_key=True)
+    file_id = Column(Integer)
+    tag_id = Column(Integer)
+
+    def __repr__(self):
+        return f'TagRecord(id={self.id}, file_id={self.file_id}, tag_id={self.tag_id})'
 
 def connect_sqlite(database):
     absolute_path = os.path.abspath(os.path.expanduser(database))
@@ -69,38 +87,20 @@ def connect_sqlite(database):
     session = sqlalchemy.orm.sessionmaker(bind=engine)()
     return session
 
-def find_file(
+def find_file_by_path(
     session: sqlalchemy.orm.Session,
     absolute_path: str,
-    relative_path: str,
-    size: int,
-    updated_at: DateTime,
+    relative_path: str | None = None,
+    size: int | None = None,
+    updated_at: DateTime | None = None,
 ) -> File | None:
-    # 絶対パス、相対パス、ファイルサイズ、更新日時が一致するものは、変更の無いファイルとみなす
+    # 絶対パスが一致するものは、同一ファイルとみなす
     found = session.query(File).filter(
         File.absolute_path == absolute_path,
-        File.relative_path == relative_path,
-        File.size == size,
-        File.updated_at == updated_at,
     ).first()
     if found:
         return found
-    # 絶対パス、相対パスが一致したものはファイルが更新された可能性あり
-    found = session.query(File).filter(
-        File.absolute_path == absolute_path,
-        File.relative_path == relative_path,
-    ).first()
-    if found:
-        return found
-    # 絶対パス、ファイルサイズ、更新日時が一致するものは、基準ディレクトリが変更された可能性あり
-    found = session.query(File).filter(
-        File.absolute_path == relative_path,
-        File.size == size,
-        File.updated_at == updated_at,
-    ).first()
-    if found:
-        return found
-    # 相対パス、ファイルサイズ、更新日時が一致するものは、移動したファイルとみなす
+    # 相対パス、ファイルサイズ、更新日時が一致するものは、環境が移行したファイルとみなす
     found = session.query(File).filter(
         File.relative_path == relative_path,
         File.size == size,
@@ -127,25 +127,92 @@ def find_duplicate(
         return found
     return None
 
+def get_tag(
+    session: sqlalchemy.orm.Session,
+    name: str,
+    add: bool = False,
+    counters: dict[str, tqdm] = None,
+) -> Tag | None:
+    found = session.query(Tag).filter(
+        Tag.name == name,
+    ).first()
+    if found:
+        return found
+    if add:
+        tag = Tag()
+        tag.name = name
+        session.add(instance=tag)
+        session.commit()
+        #logger.debug('Added: %s', tag)
+        increment(counters, 'new tags')
+        return tag
+    return None
+
+def get_file_tag(
+    session: sqlalchemy.orm.Session,
+    absolute_path: str,
+    tag_name: str,
+    add: bool = False,
+    counters: dict[str, tqdm] = None,
+) -> Tag | None:
+    file = find_file_by_path(
+        session=session,
+        absolute_path=absolute_path,
+    )
+    if not file:
+        raise ValueError('File not found: %s' % absolute_path)
+    tag = get_tag(
+        session=session,
+        name=tag_name,
+        add=add,
+        counters=counters,
+    )
+    found = session.query(FileTagRelation).filter(
+        FileTagRelation.file_id == file.id,
+        FileTagRelation.tag_id == tag.id,
+    ).first()
+    if found:
+        return found
+    if add:
+        rel = FileTagRelation()
+        rel.file_id = file.id
+        rel.tag_id = tag.id
+        tag.num_files += 1
+        session.add(instance=tag)
+        session.commit()
+        increment(counters, 'new file-tags')
+        return rel
+    return None
+
+def increment(
+    counters: dict[str, tqdm] | None,
+    key: str,
+):
+    if counters is not None:
+        if key not in counters:
+            counters[key] = tqdm(
+                desc=key,
+            )
+        counters[key].update(1)
+
 def update_file(
     session: sqlalchemy.orm.Session,
     absolute_path: str,
     relative_path: str,
-    it_new_files: tqdm | None = None,
-    it_skipped_files: tqdm | None = None,
-    it_modified_files: tqdm | None = None,
+    counters: dict[str, tqdm] = None,
 ):
     size = os.path.getsize(absolute_path)
     mtime = os.path.getmtime(absolute_path)
     updated_at = datetime.datetime.fromtimestamp(int(mtime))
     # 重複チェック
-    found = find_file(
+    found = find_file_by_path(
         session=session,
         absolute_path=absolute_path,
         relative_path=relative_path,
         size=size,
         updated_at=updated_at,
     )
+
     modified = False
     if found:
         file = found
@@ -154,8 +221,7 @@ def update_file(
         session.add(instance=file)
         modified = True
         #logger.debug('new file: %s', file)
-        if it_new_files is not None:
-            it_new_files.update(1)
+        increment(counters, 'new files')
     if any([
         file.size != size,
         file.updated_at != updated_at,
@@ -167,8 +233,7 @@ def update_file(
             file.relative_path == relative_path,
         ]):
             #logger.debug('no change: %s', file)
-            if it_skipped_files is not None:
-                it_skipped_files.update(1)
+            increment(counters, 'skipped files')
             return
     file.absolute_path = absolute_path
     file.relative_path = relative_path
@@ -179,6 +244,22 @@ def update_file(
         hash = hashlib.sha256(open(absolute_path, 'rb').read()).hexdigest()
         file.mime_type = mime_type
         file.hash = hash
+
+    dir_names = Path(relative_path).parts[:-1]
+    for dir_name in dir_names:
+        #tag = get_tag(
+        #    session=session,
+        #    name=dir_name,
+        #    add=True,
+        #)
+        get_file_tag(
+            session=session,
+            absolute_path=absolute_path,
+            tag_name=dir_name,
+            add=True,
+            counters=counters,
+        )
+
     session.commit()
 
     duplicated = None
@@ -187,6 +268,8 @@ def update_file(
             session=session,
             file=file,
         )
+        if duplicated:
+            increment(counters, 'duplicated files')
         #logger.debug('duplicated: %s', duplicated)
     new_duplicated = duplicated is not None
     if file.detected_as_duplicated != new_duplicated:
@@ -194,8 +277,7 @@ def update_file(
         session.commit()
 
     if not found:
-        if it_modified_files is not None:
-            it_modified_files.update(1)
+        increment(counters, 'modified files')
 
 def get_ignore_rules(
     session: sqlalchemy.orm.Session,
@@ -212,33 +294,26 @@ def scan_directory(
     max_depth: int = 10,
     ignore_rules: list[str] = [],
     depth: int = 0,
-    it_scanned_entries: tqdm | None = None,
-    it_ignored_entries: tqdm | None = None,
-    it_new_files: tqdm | None = None,
-    it_skipped_files: tqdm | None = None,
-    it_modified_files: tqdm | None = None,
+    counters: dict[str, tqdm] = None,
 ):
     if depth > max_depth:
         logger.warning('max depth reached: %s', path)
         return
+    if counters is None:
+        counters = {}
     kwargs = dict(
         session=session,
         scan_path=scan_path,
         max_depth=max_depth,
         ignore_rules=ignore_rules,
-        it_scanned_entries=it_scanned_entries,
-        it_ignored_entries=it_ignored_entries,
-        it_new_files=it_new_files,
-        it_skipped_files=it_skipped_files,
-        it_modified_files=it_modified_files,
+        counters=counters,
     )
+
     for elem in os.listdir(path):
-        if it_scanned_entries is not None:
-            it_scanned_entries.update(1)
+        increment(counters, 'scanned entries')
         if elem in ignore_rules:
             #logger.warning('ignored: %s', elem)
-            if it_ignored_entries is not None:
-                it_ignored_entries.update(1)
+            increment(counters, 'ignored entries')
             continue
         found_path = os.path.join(path, elem)
         if os.path.isfile(found_path):
@@ -249,9 +324,10 @@ def scan_directory(
                 session=session,
                 absolute_path=absolute_path,
                 relative_path=relative_path,
-                it_new_files=it_new_files,
-                it_skipped_files=it_skipped_files,
-                it_modified_files=it_modified_files,
+                #it_new_files=it_new_files,
+                #it_skipped_files=it_skipped_files,
+                #it_modified_files=it_modified_files,
+                counters=counters,
             )
         elif os.path.isdir(found_path):
             #logger.debug('directory: %s', found_path)
@@ -269,31 +345,16 @@ def command_scan(args):
     session = connect_sqlite(args.database)
     ignore_rules = get_ignore_rules(session)
     logger.debug('ignore_rules: %s', ignore_rules)
-    it_scanned_entries = tqdm(
-        desc='scanned',
-    )
-    it_ignored_entries = tqdm(
-        desc='ignored',
-    )
-    it_new_files = tqdm(
-        desc='new files',
-    )
-    it_skipped_files = tqdm(
-        desc='skipped files',
-    )
-    it_modified_files = tqdm(
-        desc='modified files',
-    )
     scan_directory(
         session=session,
         scan_path=args.path,
         path=args.path,
         ignore_rules=ignore_rules,
-        it_scanned_entries=it_scanned_entries,
-        it_ignored_entries=it_ignored_entries,
-        it_new_files=it_new_files,
-        it_skipped_files=it_skipped_files,
-        it_modified_files=it_modified_files,
+        #it_scanned_entries=it_scanned_entries,
+        #it_ignored_entries=it_ignored_entries,
+        #it_new_files=it_new_files,
+        #it_skipped_files=it_skipped_files,
+        #it_modified_files=it_modified_files,
     )
 
 def command_find(args):
@@ -362,6 +423,14 @@ def command_export_rules(args):
     str_json = df.to_json(orient='records', indent=2)
     print(str_json)
 
+def command_export_tags(args):
+    session = connect_sqlite(args.database)
+    tags = session.query(Tag)
+    df = pd.read_sql(tags.statement, tags.session.bind)
+    df = df[(key for key in df.keys() if key != 'id')]
+    str_json = df.to_json(orient='records', indent=2)
+    print(str_json)
+
 def load_json(path):
     if path.endswith('.json'):
         with open(path, 'r') as f:
@@ -415,6 +484,9 @@ def main():
 
     parser_export_rules = subparsers.add_parser('export-rules', help='Export rules')
     parser_export_rules.set_defaults(handler=command_export_rules)
+
+    parser_export_tags = subparsers.add_parser('export-tags', help='Export tags')
+    parser_export_tags.set_defaults(handler=command_export_tags)
 
     parser_import_rules = subparsers.add_parser('import-rules', help='Import rules')
     parser_import_rules.add_argument(
