@@ -14,7 +14,9 @@ import magic
 from pathlib import Path
 
 from logzero import logger
+
 from tqdm.auto import tqdm
+#from tqdm.asyncio import tqdm_asyncio
 
 import sqlalchemy
 from sqlalchemy.orm import declarative_base
@@ -129,6 +131,9 @@ def update_file(
     session: sqlalchemy.orm.Session,
     absolute_path: str,
     relative_path: str,
+    it_new_files: tqdm | None = None,
+    it_skipped_files: tqdm | None = None,
+    it_modified_files: tqdm | None = None,
 ):
     size = os.path.getsize(absolute_path)
     mtime = os.path.getmtime(absolute_path)
@@ -149,6 +154,8 @@ def update_file(
         session.add(instance=file)
         modified = True
         #logger.debug('new file: %s', file)
+        if it_new_files is not None:
+            it_new_files.update(1)
     if any([
         file.size != size,
         file.updated_at != updated_at,
@@ -159,7 +166,9 @@ def update_file(
             file.absolute_path == absolute_path,
             file.relative_path == relative_path,
         ]):
-            logger.debug('no change: %s', file)
+            #logger.debug('no change: %s', file)
+            if it_skipped_files is not None:
+                it_skipped_files.update(1)
             return
     file.absolute_path = absolute_path
     file.relative_path = relative_path
@@ -170,8 +179,6 @@ def update_file(
         hash = hashlib.sha256(open(absolute_path, 'rb').read()).hexdigest()
         file.mime_type = mime_type
         file.hash = hash
-    if not found:
-        logger.debug('new file: %s', file)
     session.commit()
 
     duplicated = None
@@ -185,6 +192,10 @@ def update_file(
     if file.detected_as_duplicated != new_duplicated:
         file.detected_as_duplicated = new_duplicated
         session.commit()
+
+    if not found:
+        if it_modified_files is not None:
+            it_modified_files.update(1)
 
 def get_ignore_rules(
     session: sqlalchemy.orm.Session,
@@ -201,6 +212,11 @@ def scan_directory(
     max_depth: int = 10,
     ignore_rules: list[str] = [],
     depth: int = 0,
+    it_scanned_entries: tqdm | None = None,
+    it_ignored_entries: tqdm | None = None,
+    it_new_files: tqdm | None = None,
+    it_skipped_files: tqdm | None = None,
+    it_modified_files: tqdm | None = None,
 ):
     if depth > max_depth:
         logger.warning('max depth reached: %s', path)
@@ -210,20 +226,32 @@ def scan_directory(
         scan_path=scan_path,
         max_depth=max_depth,
         ignore_rules=ignore_rules,
+        it_scanned_entries=it_scanned_entries,
+        it_ignored_entries=it_ignored_entries,
+        it_new_files=it_new_files,
+        it_skipped_files=it_skipped_files,
+        it_modified_files=it_modified_files,
     )
     for elem in os.listdir(path):
+        if it_scanned_entries is not None:
+            it_scanned_entries.update(1)
         if elem in ignore_rules:
-            logger.warning('ignored: %s', elem)
+            #logger.warning('ignored: %s', elem)
+            if it_ignored_entries is not None:
+                it_ignored_entries.update(1)
             continue
         found_path = os.path.join(path, elem)
         if os.path.isfile(found_path):
-            logger.debug('file: %s', found_path)
+            #logger.debug('file: %s', found_path)
             absolute_path = os.path.abspath(found_path)
             relative_path = os.path.relpath(found_path, scan_path)
             update_file(
                 session=session,
                 absolute_path=absolute_path,
                 relative_path=relative_path,
+                it_new_files=it_new_files,
+                it_skipped_files=it_skipped_files,
+                it_modified_files=it_modified_files,
             )
         elif os.path.isdir(found_path):
             #logger.debug('directory: %s', found_path)
@@ -233,7 +261,7 @@ def scan_directory(
                 **kwargs,
             )
         else:
-            logger.debug('unknown: %s', found_path)
+            logger.warning('unknown: %s', found_path)
 
 def command_scan(args):
     logger.debug('Scanning files')
@@ -241,11 +269,31 @@ def command_scan(args):
     session = connect_sqlite(args.database)
     ignore_rules = get_ignore_rules(session)
     logger.debug('ignore_rules: %s', ignore_rules)
+    it_scanned_entries = tqdm(
+        desc='scanned',
+    )
+    it_ignored_entries = tqdm(
+        desc='ignored',
+    )
+    it_new_files = tqdm(
+        desc='new files',
+    )
+    it_skipped_files = tqdm(
+        desc='skipped files',
+    )
+    it_modified_files = tqdm(
+        desc='modified files',
+    )
     scan_directory(
         session=session,
         scan_path=args.path,
         path=args.path,
         ignore_rules=ignore_rules,
+        it_scanned_entries=it_scanned_entries,
+        it_ignored_entries=it_ignored_entries,
+        it_new_files=it_new_files,
+        it_skipped_files=it_skipped_files,
+        it_modified_files=it_modified_files,
     )
 
 def command_find(args):
